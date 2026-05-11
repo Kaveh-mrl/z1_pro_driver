@@ -7,11 +7,18 @@ from rclpy.node import Node, Optional
 from rclpy.executors import Future, MultiThreadedExecutor
 
 from geographic_msgs.msg import GeoPoint
-from geometry_msgs.msg import Vector3
+from geometry_msgs.msg import Vector3, PointStamped
+from nav_msgs.msg import Odometry
+from tf2_ros import Buffer, TransformListener
+import math
 
 from smarc_action_base.gentler_action_server import GentlerActionServer
 from z1_pro_msgs.msg import Topics as Z1Topics
 from z1_pro_msgs.msg import GimbalFeedback
+from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
+from tf_transformations import euler_from_quaternion
+
+from smarc_utilities.georef_utils import convert_latlon_to_utm
 
 
 
@@ -24,6 +31,16 @@ class GimbalActionServer:
         node.declare_parameter("rpy_pub_hz", 10.0)
         self._rpy_pub_hz : float = node.get_parameter("rpy_pub_hz").get_parameter_value().double_value
 
+        node.declare_parameter("odom_topic", "/evolo/smarc/odom")
+        odom_topic = node.get_parameter("odom_topic").get_parameter_value().string_value
+
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, node)
+
+        self.carrier_odom : Odometry = Odometry() #Odom of carrier
+        self._odom_subscriber = node.create_subscription(Odometry, odom_topic, self.odom_cb, 10)
+
+        self.desired_geopoint_local_coordinates : PointStamped = PointStamped()
         self.desired_rpy : Vector3 = Vector3()
         self._rpy_publisher = node.create_publisher(Vector3, Z1Topics.GIMBAL_CMD_TOPIC, 10)
 
@@ -48,7 +65,7 @@ class GimbalActionServer:
         self._geopoint_as = GentlerActionServer(
             self._node,
             "gimbal_set_geopoint",
-            lambda goal_request: self._node.get_logger().warn("Geopoint action not implemented yet") and False,
+            self._on_goal_received_geopoint,
             lambda: True,
             lambda: None,
             lambda: True,
@@ -93,7 +110,8 @@ class GimbalActionServer:
 
         self.log(f"GimbalActionServer initialized.")
 
-
+    def odom_cb(self, msg:Odometry):
+        self.carrier_odom = msg
 
     def publish_rpy_and_fb(self):
         self.feedback.gimbal_mode = self.tracking_mode
@@ -102,9 +120,50 @@ class GimbalActionServer:
         if self.tracking_mode == GimbalFeedback.GIMBAL_MODE_OFF:
             self.log("Gimbal is off, not publishing RPY commands.")
             return
-        
-        self._rpy_publisher.publish(self.desired_rpy)
-        self.log(f"Published desired RPY: {self.desired_rpy}")
+        elif self.tracking_mode == GimbalFeedback.GIMBAL_MODE_GEOPOINT:
+
+            # (1) bearing between evolo and POI
+            dx = self.desired_geopoint_local_coordinates.point.x - self.carrier_odom.pose.pose.position.x
+            dy = self.desired_geopoint_local_coordinates.point.y - self.carrier_odom.pose.pose.position.y
+            poi_bearing = math.atan2(dy,dx)
+
+            # (2) carrier heading
+            # get pitch roll yaw from quaternion
+            orientation_q = self.carrier_odom.pose.pose.orientation
+            orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+            (roll, pitch, carrier_yaw) = euler_from_quaternion(orientation_list)
+
+            # (3) calcualte pitch
+            carrier_altitude = self.carrier_odom.pose.pose.position.z
+            poi_altitude = self.desired_geopoint_local_coordinates.point.z
+            distance = math.sqrt(dx*dx + dy*dy)
+            target_pitch_deg = math.degrees(math.atan2(poi_altitude - carrier_altitude, distance))
+
+            # (4) Calculate camera angle needed for looking at the POI
+            target_yaw = carrier_yaw - poi_bearing
+            target_yaw_deg = math.degrees(target_yaw)
+            #Unwrap
+            if(target_yaw_deg < -180):
+                target_yaw_deg += 360
+            if(target_yaw_deg > 180):
+                target_yaw_deg -=360
+
+            desired_rpy : Vector3 = Vector3()
+            desired_rpy.x = 0.0 #roll
+            desired_rpy.y = target_pitch_deg
+            desired_rpy.z = target_yaw_deg
+
+        elif self.tracking_mode == GimbalFeedback.GIMBAL_MODE_ODOM_POI:
+            #TODO calculate rpy for POI
+            return
+        elif self.tracking_mode == GimbalFeedback.GIMBAL_MODE_IMG_POI:
+            #TODO calculate rpy for POI
+            return
+        else: # RPY
+            desired_rpy = self.desired_rpy
+
+        self._rpy_publisher.publish(desired_rpy)
+        self.log(f"Published RPY: {desired_rpy}")
 
 
     def log(self, msg:str):
@@ -129,6 +188,49 @@ class GimbalActionServer:
             self.desired_rpy.y = float(goal_request["pitch"])
             self.desired_rpy.z = float(goal_request["yaw"])
             self.tracking_mode = GimbalFeedback.GIMBAL_MODE_RPY
+            return True
+        except KeyError as e:
+            self.log("Missing key in goal request")
+            return False
+        except ValueError as e:
+            self.log("Invalid value in goal request")
+            return False
+
+    def _on_goal_received_geopoint(self, goal_request: dict) -> bool:
+        """
+        float64 latitude  # [deg]
+        float64 longitude # [deg]
+        float64 altitude  # [m]
+        """
+        self.log(f"Received RPY goal: {goal_request}")
+        try:
+            geopoint = GeoPoint()
+            geopoint.latitude = float(goal_request["latitude"])
+            geopoint.longitude = float(goal_request["longitude"])
+            geopoint.altitude = float(goal_request["altitude"])
+
+            #Get point in UTM
+            geopoint_local_coordinates :PointStamped = convert_latlon_to_utm(geopoint) #pointStamped
+
+            #transform to odom frame
+            transform = self._tf_buffer.lookup_transform(
+                self.carrier_odom.header.frame_id,
+                geopoint_local_coordinates.header.frame_id,
+                rclpy.time.Time()
+            )
+
+            self.desired_geopoint_local_coordinates = do_transform_point(
+                geopoint_local_coordinates,
+                transform
+            )
+
+            self._node.get_logger().info(f"Converted POI to local coordinates: {self.desired_geopoint_local_coordinates.point.x} ,\
+                                         {self.desired_geopoint_local_coordinates.point.y}, \
+                                         {self.desired_geopoint_local_coordinates.point.z}, \
+                                         {self.desired_geopoint_local_coordinates.header.frame_id}")
+
+
+            self.tracking_mode = GimbalFeedback.GIMBAL_MODE_GEOPOINT
             return True
         except KeyError as e:
             self.log("Missing key in goal request")
