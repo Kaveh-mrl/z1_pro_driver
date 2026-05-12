@@ -7,14 +7,14 @@ from rclpy.node import Node, Optional
 from rclpy.executors import Future, MultiThreadedExecutor
 
 from geographic_msgs.msg import GeoPoint
-from geometry_msgs.msg import Vector3, PointStamped
+from geometry_msgs.msg import Vector3, PointStamped, QuaternionStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import Buffer, TransformListener
 import math
 
 from smarc_action_base.gentler_action_server import GentlerActionServer
 from z1_pro_msgs.msg import Topics as Z1Topics
-from z1_pro_msgs.msg import GimbalFeedback
+from z1_pro_msgs.msg import GimbalFeedback, Gcudata
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 from tf_transformations import euler_from_quaternion
 
@@ -34,6 +34,9 @@ class GimbalActionServer:
         node.declare_parameter("odom_topic", "/evolo/smarc/odom")
         odom_topic = node.get_parameter("odom_topic").get_parameter_value().string_value
 
+        node.declare_parameter("img_poi_topic", "/yolo/tracked_poi")
+        img_poi_topic = node.get_parameter("img_poi_topic").get_parameter_value().string_value
+
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, node)
 
@@ -43,6 +46,12 @@ class GimbalActionServer:
         self.desired_geopoint_local_coordinates : PointStamped = PointStamped()
         self.desired_rpy : Vector3 = Vector3()
         self._rpy_publisher = node.create_publisher(Vector3, Z1Topics.GIMBAL_CMD_TOPIC, 10)
+
+        self.gcu_feedback = Gcudata()
+        self.gcu_feedback_subscriber = node.create_subscription(Gcudata, Z1Topics.GIMBAL_GCU_FB_TOPIC, self.gcu_cb, 10)
+
+        self.image_poi = None
+        self.image_poi_subscriber = node.create_subscription(QuaternionStamped, img_poi_topic, self.image_poi_cb, 10)
 
         self.feedback : GimbalFeedback = GimbalFeedback()
         self._feedback_publisher = node.create_publisher(GimbalFeedback, Z1Topics.GIMBAL_FB_TOPIC, 10)
@@ -76,7 +85,7 @@ class GimbalActionServer:
         self._track_img_poi_as = GentlerActionServer(
             self._node,
             "gimbal_track_img_poi",
-            lambda goal_request: self._node.get_logger().warn("Image POI tracking action not implemented yet") and False,
+            self._on_goal_received_img_poi,
             lambda: True,
             lambda: None,
             lambda: True,
@@ -110,8 +119,14 @@ class GimbalActionServer:
 
         self.log(f"GimbalActionServer initialized.")
 
-    def odom_cb(self, msg:Odometry):
+    def odom_cb(self, msg: Odometry):
         self.carrier_odom = msg
+
+    def image_poi_cb(self, msg: QuaternionStamped):
+        self.image_poi = msg
+
+    def gcu_cb(self, msg: Gcudata):
+        self.gcu_feedback = msg
 
     def publish_rpy_and_fb(self):
         self.feedback.gimbal_mode = self.tracking_mode
@@ -153,12 +168,51 @@ class GimbalActionServer:
             desired_rpy.y = target_pitch_deg
             desired_rpy.z = target_yaw_deg
 
+            return
+
         elif self.tracking_mode == GimbalFeedback.GIMBAL_MODE_ODOM_POI:
             #TODO calculate rpy for POI
             return
+
         elif self.tracking_mode == GimbalFeedback.GIMBAL_MODE_IMG_POI:
-            #TODO calculate rpy for POI
-            return
+            if(self.image_poi != None): #we have received a new tracking location
+                #(1) Calculate angle we need to turn the camera to face the POI)
+
+                orientation_q = self.image_poi.quaternion
+                orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+                (roll, pitch, yaw) = euler_from_quaternion(orientation_list)
+
+                pitch = math.degrees(pitch)
+                yaw = math.degrees(yaw)
+                
+                #Slow down the movements of the camera
+                pitch /= 4.0
+                yaw /= 4.0
+
+                new_pitch = self.gcu_feedback.relative_pitch - pitch
+                new_yaw = self.gcu_feedback.relative_yaw + yaw
+
+                # (2) Limit angles to be nice to the camera
+                IMG_POI_MAX_YAW = 120.0
+                IMG_POI_MAX_PITCH = 30.0
+                new_yaw = max(-IMG_POI_MAX_YAW, min(IMG_POI_MAX_YAW, new_yaw))
+                new_pitch = max(-IMG_POI_MAX_PITCH, min(IMG_POI_MAX_PITCH, new_pitch))
+
+                self.log(f"POI pitch: {pitch}, POI_YAW: {yaw}")
+                
+
+                desired_rpy : Vector3 = Vector3()
+                desired_rpy.x = 0.0 #roll
+                desired_rpy.y = new_pitch
+                desired_rpy.z = new_yaw
+
+                #Clear image POI so we don't use it again
+                self.image_poi = None
+            else:
+                #No new tracking information. Don't move camera
+                return
+
+            
         else: # RPY
             desired_rpy = self.desired_rpy
 
@@ -238,6 +292,20 @@ class GimbalActionServer:
         except ValueError as e:
             self.log("Invalid value in goal request")
             return False
+    
+    def _on_goal_received_img_poi(self, goal_request: dict) -> bool:
+        self.log(f"Received Image track goal: {goal_request}")
+        try:
+            #No parameters
+            self.tracking_mode = GimbalFeedback.GIMBAL_MODE_IMG_POI
+            return True
+        except KeyError as e:
+            self.log("Missing key in goal request")
+            return False
+        except ValueError as e:
+            self.log("Invalid value in goal request")
+            return False
+
 
 def main():
     rclpy.init()
