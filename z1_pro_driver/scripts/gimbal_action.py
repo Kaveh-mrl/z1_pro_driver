@@ -182,12 +182,12 @@ class GimbalActionServer:
                 orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
                 (roll, pitch, yaw) = euler_from_quaternion(orientation_list)
 
-                pitch = math.degrees(pitch)
+                pitch = math.degrees(-pitch)
                 yaw = math.degrees(yaw)
                 
-                #Slow down the movements of the camera
-                pitch /= 4.0
-                yaw /= 4.0
+                #Slow down the movements of the camera to make it work even with the delays in the detecion pipeline
+                pitch *= 0.4
+                yaw *= 0.4
 
                 new_pitch = self.gcu_feedback.relative_pitch - pitch
                 new_yaw = self.gcu_feedback.relative_yaw + yaw
@@ -199,7 +199,6 @@ class GimbalActionServer:
                 new_pitch = max(-IMG_POI_MAX_PITCH, min(IMG_POI_MAX_PITCH, new_pitch))
 
                 self.log(f"POI pitch: {pitch}, POI_YAW: {yaw}")
-                
 
                 desired_rpy : Vector3 = Vector3()
                 desired_rpy.x = 0.0 #roll
