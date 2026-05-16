@@ -46,6 +46,7 @@ install(TARGETS
 install(PROGRAMS 
   scripts/read_and_publish.py 
   scripts/gimbal_action.py
+  scripts/global_gimbal_pose_pub.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
