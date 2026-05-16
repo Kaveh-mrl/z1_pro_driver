@@ -1,10 +1,16 @@
+#!/usr/bin/env python3
+import math
+
 import rclpy
 from rclpy.time import Time
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped, Vector3
+from rclpy.executors import MultiThreadedExecutor
+
 import tf2_ros
-from z1_pro_msgs.msg import Gcudata, Topics
 from tf_transformations import quaternion_from_euler
+
+from geometry_msgs.msg import PoseStamped, Vector3
+from z1_pro_msgs.msg import Gcudata, Topics
 
 class GlobalPubber:
     
@@ -26,6 +32,7 @@ class GlobalPubber:
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self.node)
 
         self._pose_pub = self.node.create_publisher(PoseStamped, f"/{robot_name}/rviz/global_gimbal_pose", 10)
+        self._rel_pose_pub = self.node.create_publisher(PoseStamped, f"/{robot_name}/rviz/relative_gimbal_pose", 10)
 
         
     def gcu_cb(self, msg : Gcudata):
@@ -33,21 +40,22 @@ class GlobalPubber:
         if rp is None:
             self.node.get_logger().error("Failed to get relative pose in map, skipping gimbal pose publish")
             return
-        r = msg.absolute_roll
-        p = msg.absolute_pitch
-        y = msg.absolute_yaw
+        r = math.radians(msg.absolute_roll)
+        p = math.radians(msg.absolute_pitch)
+        y = math.radians(90-msg.absolute_yaw) # the raw value is compass heading, not really "yaw" in ENU
         q = quaternion_from_euler(r, p, y)
         gp = PoseStamped()
         gp.pose.orientation.x = q[0]
         gp.pose.orientation.y = q[1]
         gp.pose.orientation.z = q[2]
         gp.pose.orientation.w = q[3]
-        gp.pose.position = rp.pose.position
+        gp.pose.position.x = rp.pose.position.x
+        gp.pose.position.y = rp.pose.position.y
+        gp.pose.position.z = rp.pose.position.z
         gp.header.stamp = rp.header.stamp
         gp.header.frame_id = self.map_frame
         self._pose_pub.publish(gp)
-
-
+        self._rel_pose_pub.publish(rp)
 
     def get_relative_pose_in_map(self) -> PoseStamped|None:
         try:
@@ -62,3 +70,19 @@ class GlobalPubber:
         except Exception as e:
             self.node.get_logger().error(f"Failed to get transform: {e}")
             return None
+
+def main():
+    rclpy.init()
+    
+    node = Node("global_gimbal_pose_pub_node")
+    GlobalPubber(node)
+    
+    executor = MultiThreadedExecutor()
+    rclpy.spin(node, executor=executor)
+
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
