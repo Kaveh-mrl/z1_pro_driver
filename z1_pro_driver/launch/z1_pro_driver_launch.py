@@ -11,7 +11,7 @@ from z1_pro_msgs.msg import Topics as Z1ProTopics
 def make_robot_state_publisher_node(context, *args, **kwargs):
     robot_name = LaunchConfiguration("robot_name").perform(context)
     camera_below_base = LaunchConfiguration("camera_below_base").perform(context)
-    frame_prefix = LaunchConfiguration("tf_frame_prefix").perform(context)
+    frame_prefix = robot_name + "/" if robot_name else ""
 
     pkg_share = get_package_share_directory("z1_pro_driver")
 
@@ -41,9 +41,6 @@ def make_robot_state_publisher_node(context, *args, **kwargs):
 
 
 def generate_launch_description():
-    gimbal_ctrl_topic = Z1ProTopics.GIMBAL_CMD_TOPIC
-    gimbal_feedback_topic = Z1ProTopics.GIMBAL_GCU_FB_TOPIC
-
     robot_name_arg = DeclareLaunchArgument(
         "robot_name",
         default_value="",
@@ -57,13 +54,6 @@ def generate_launch_description():
         description="Whether the camera is mounted below the gimbal base."
     )
     camera_below_base = LaunchConfiguration("camera_below_base")
-
-    frame_prefix_arg = DeclareLaunchArgument(
-        "tf_frame_prefix",
-        default_value="",
-        description="Prefix for TF frames."
-    )
-    frame_prefix = LaunchConfiguration("tf_frame_prefix")
 
     ip_arg = DeclareLaunchArgument(
         "camera_ip",
@@ -85,7 +75,7 @@ def generate_launch_description():
         namespace=robot_name,
         output="screen",
         parameters=[{
-            "gimbal_feedback_topic": gimbal_feedback_topic,
+            "gimbal_feedback_topic": Z1ProTopics.GIMBAL_GCU_FB_TOPIC,
             "camera_below_base": camera_below_base
         }]
     )
@@ -97,20 +87,30 @@ def generate_launch_description():
         namespace=robot_name,
         output="screen",
         parameters=[{
-            "gimbal_ctrl_topic": gimbal_ctrl_topic,
-            "gimbal_feedback_topic": gimbal_feedback_topic,
             "camera_ip": ip,
             "camera_port": port
+        }]
+    )
+
+    global_publisher_node = Node(
+        package="z1_pro_driver",
+        executable="global_gimbal_pose_pub.py",
+        name="global_gimbal_pose_publisher",
+        namespace=robot_name,
+        output="screen",
+        parameters=[{
+            "robot_name": robot_name,
+            "map_link": "map",
         }]
     )
 
     return LaunchDescription([
         robot_name_arg,
         camera_below_base_arg,
-        frame_prefix_arg,
         ip_arg,
         port_arg,
         OpaqueFunction(function=make_robot_state_publisher_node),
         gimbal_joint_publisher_node,
         read_and_publish_node,
+        global_publisher_node
     ])
