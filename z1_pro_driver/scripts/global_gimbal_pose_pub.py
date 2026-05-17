@@ -23,6 +23,8 @@ class GlobalPubber:
 
         node.declare_parameter("map_link", "map")
         map_frame = node.get_parameter("map_link").get_parameter_value().string_value
+
+        # "camera_below_base" might be needed...
         
         self._map_link = f"{robot_name}/{map_frame}"
         self._local_camera_link = f"{robot_name}/z1_camera_link"
@@ -64,7 +66,7 @@ class GlobalPubber:
         
     def gcu_cb(self, msg : Gcudata):
         r = math.radians(msg.absolute_roll)
-        p = math.radians(msg.absolute_pitch)
+        p = math.radians(-msg.absolute_pitch) # panic! random minus sign
         y = math.radians(90-msg.absolute_yaw) # the raw value is compass heading, not really "yaw" in ENU
         self._abs_rpy = (r,p,y)
         
