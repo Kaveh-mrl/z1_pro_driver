@@ -8,7 +8,7 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 
 import tf2_ros
-from tf_transformations import quaternion_from_euler
+from tf_transformations import quaternion_from_euler, euler_from_quaternion
 
 from geometry_msgs.msg import TransformStamped
 from z1_pro_msgs.msg import Gcudata, Topics
@@ -79,8 +79,15 @@ class GlobalPubber:
         except Exception as e:
             self.node.get_logger().error(f"Failed to get transform: {e}")
             return
+
+        rel_rpy = euler_from_quaternion((rp.transform.rotation.x, rp.transform.rotation.y, rp.transform.rotation.z, rp.transform.rotation.w))
+
+        # we want to use the yaw from the camera's encoder on the base, which should
+        # be way better than the magnetometer based one in the "global" frame
+        # but the gyro should be better than the encoders for pitch, so we mix...
+        mixed_rpy = (rel_rpy[0], self._abs_rpy[1], rel_rpy[2])
         
-        q = quaternion_from_euler(*self._abs_rpy)
+        q = quaternion_from_euler(*mixed_rpy)
         gp = TransformStamped()
         gp.transform.rotation.x = q[0]
         gp.transform.rotation.y = q[1]
