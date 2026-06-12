@@ -3,6 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
+from std_msgs.msg import String
 from z1_pro_msgs.msg import Gcudata, Topics
 
 import socket
@@ -37,6 +38,16 @@ class GimbalReadAndPublish(Node):
                                                      self.listener_callback,
                                                      10)
         self.subscription  # prevent unused variable warning
+
+        # Topic for all camera commands (toggle_record, osd_on, osd_off)
+        self._camera_cmd_dispatch = {
+            "toggle_record": send_toggle_record_command,
+            "osd_on": send_osd_on_command,
+            "osd_off": send_osd_off_command,
+        }
+        self.camera_cmd_sub = self.create_subscription(
+            String, Topics.GIMBAL_CAMERA_CMD_TOPIC,
+            self.camera_cmd_callback, 10)
 
     def timer_callback(self):
         msg = Gcudata()
@@ -86,6 +97,14 @@ class GimbalReadAndPublish(Node):
         msg.recording = bool(getBit(extracted_camera_status[0], 4))  
 
         self.publisher_.publish(msg)
+
+    def camera_cmd_callback(self, msg: String):
+        fn = self._camera_cmd_dispatch.get(msg.data)
+        if fn is None:
+            self.get_logger().warn(f"Unknown camera command: '{msg.data}'")
+            return
+        response = fn()
+        self.get_logger().info(f"Camera cmd '{msg.data}' response: {response.hex() if response else 'None'}")
 
     def listener_callback(self, msg):
         print(f"desired_gimbal_euler received: x:{msg.x}, {msg.y}, {msg.z}")  # print for debugging
@@ -206,12 +225,28 @@ def send_toggle_record_command():
         send_null_command()
         packet = build_packet(
             order=0x21,
-            param_bytes=b"/x01",
+            param_bytes=b"\x01",
             ctrl_valid=True,
         )
         sock.sendall(packet)
         return sock.recv(1024)
 
+def send_osd_on_command():
+    global sock
+    if sock:
+        send_null_command()
+        packet = build_packet(order=0x73, param_bytes=b"\x01")
+        sock.sendall(packet)
+        return sock.recv(1024)
+
+
+def send_osd_off_command():
+    global sock
+    if sock:
+        send_null_command()
+        packet = build_packet(order=0x73, param_bytes=b"\x00")
+        sock.sendall(packet)
+        return sock.recv(1024)
 
 def main(args=None):
 
