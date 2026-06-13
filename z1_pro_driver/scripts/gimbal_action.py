@@ -59,9 +59,6 @@ class GimbalActionServer:
         self._feedback_publisher = node.create_publisher(GimbalFeedback, Z1Topics.GIMBAL_FB_TOPIC, 10)
         self.tracking_mode : str = GimbalFeedback.GIMBAL_MODE_OFF
 
-        # Publisher for one-shot camera hardware commands.
-        # read_and_publish.py subscribes to this topic and forwards the command
-        # over the TCP socket to the gimbal hardware.
         self._camera_cmd_publisher = node.create_publisher(String, Z1Topics.GIMBAL_CAMERA_CMD_TOPIC, 10)
 
         self._rpy_as = GentlerActionServer(
@@ -120,10 +117,7 @@ class GimbalActionServer:
             loop_frequency = 1.0
         )
 
-        # Action server: start recording.
-        # The goal handler checks gcu_feedback.recording before sending the
-        # toggle command, so calling record_on when already recording is a
-        # safe no-op (avoids accidentally toggling recording off).
+        # Action server: start recording, checks gcu_feedback.recording before sending the toggle command.
         self._record_on_as = GentlerActionServer(
             self._node,
             Z1Topics.GIMBAL_RECORD_ON_ACTION,
@@ -136,7 +130,6 @@ class GimbalActionServer:
         )
 
         # Action server: stop recording.
-        # Same idempotency logic as record_on — does nothing if already stopped.
         self._record_off_as = GentlerActionServer(
             self._node,
             Z1Topics.GIMBAL_RECORD_OFF_ACTION,
@@ -339,34 +332,19 @@ class GimbalActionServer:
             return False
 
     def send_camera_command(self, cmd: str):
-        """Publish a one-shot camera hardware command to read_and_publish.py.
+        #Publish a camera command to read_and_publish.py.
+        #The command string should be one of:
+        #  'toggle_record' -- toggles recording on/off at the hardware level
+        #  'osd_on'        -- enables the OSD overlay
+        #  'osd_off'       -- disables the OSD overlay
 
-        The command string must match a key in read_and_publish._camera_cmd_dispatch:
-          'toggle_record' -- toggles recording on/off at the hardware level
-          'osd_on'        -- enables the OSD overlay
-          'osd_off'       -- disables the OSD overlay
-
-        Prefer the higher-level _on_goal_received_record_on/off handlers over
-        calling this directly, since those check current state first.
-        """
         msg = String()
         msg.data = cmd
         self._camera_cmd_publisher.publish(msg)
         self.log(f"Published camera command: '{cmd}'")
 
     def _on_goal_received_record_on(self, goal_request: dict) -> bool:
-        """Handle a 'start recording' action goal.
 
-        Reads gcu_feedback.recording (updated at ~50 Hz from the gimbal) to
-        check whether recording is already active. If it is, we return True
-        immediately without sending any command -- this makes the action
-        idempotent, so the mission planner can call record_on repeatedly
-        without accidentally toggling recording off.
-
-        If not currently recording, we publish 'toggle_record' to
-        GIMBAL_CAMERA_CMD_TOPIC, which read_and_publish.py forwards to the
-        gimbal over TCP (order 0x21).
-        """
         self.log("Received record ON goal")
 
         if self.gcu_feedback.recording:
@@ -380,12 +358,7 @@ class GimbalActionServer:
         return True
 
     def _on_goal_received_record_off(self, goal_request: dict) -> bool:
-        """Handle a 'stop recording' action goal.
 
-        Mirror of _on_goal_received_record_on. The state check here is
-        essential: the gimbal only has a single 'toggle' command (order 0x21),
-        so sending it when already stopped would accidentally start recording.
-        """
         self.log("Received record OFF goal")
 
         if not self.gcu_feedback.recording:
