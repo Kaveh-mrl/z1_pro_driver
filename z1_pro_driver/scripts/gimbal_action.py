@@ -29,7 +29,7 @@ class GimbalActionServer:
         self._node = node
 
 
-        node.declare_parameter("rpy_pub_hz", 10.0)
+        node.declare_parameter("rpy_pub_hz", 20.0)
         self._rpy_pub_hz : float = node.get_parameter("rpy_pub_hz").get_parameter_value().double_value
 
         node.declare_parameter("odom_topic", "/evolo/smarc/odom")
@@ -212,7 +212,7 @@ class GimbalActionServer:
                 yaw = math.degrees(yaw)
                 
                 #Slow down the movements of the camera to make it work even with the delays in the detecion pipeline
-                pitch *= 0.4
+                pitch *= 0.6
                 yaw *= 0.4
 
                 new_pitch = self.gcu_feedback.relative_pitch - pitch
