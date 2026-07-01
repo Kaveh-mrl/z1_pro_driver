@@ -9,6 +9,7 @@ from rclpy.executors import Future, MultiThreadedExecutor
 from geographic_msgs.msg import GeoPoint
 from geometry_msgs.msg import Vector3, PointStamped, QuaternionStamped
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 import math
 
@@ -28,7 +29,7 @@ class GimbalActionServer:
         self._node = node
 
 
-        node.declare_parameter("rpy_pub_hz", 10.0)
+        node.declare_parameter("rpy_pub_hz", 20.0)
         self._rpy_pub_hz : float = node.get_parameter("rpy_pub_hz").get_parameter_value().double_value
 
         node.declare_parameter("odom_topic", "/evolo/smarc/odom")
@@ -58,7 +59,7 @@ class GimbalActionServer:
         self._feedback_publisher = node.create_publisher(GimbalFeedback, Z1Topics.GIMBAL_FB_TOPIC, 10)
         self.tracking_mode : str = GimbalFeedback.GIMBAL_MODE_OFF
 
-
+        self._camera_cmd_publisher = node.create_publisher(String, Z1Topics.GIMBAL_CAMERA_CMD_TOPIC, 10)
 
         self._rpy_as = GentlerActionServer(
             self._node,
@@ -109,6 +110,30 @@ class GimbalActionServer:
             self._node,
             "gimbal_stop",
             self._on_goal_received_stop,
+            lambda: True,
+            lambda: None,
+            lambda: True,
+            lambda: "No feedback",
+            loop_frequency = 1.0
+        )
+
+        # Action server: start recording, checks gcu_feedback.recording before sending the toggle command.
+        self._record_on_as = GentlerActionServer(
+            self._node,
+            Z1Topics.GIMBAL_RECORD_ON_ACTION,
+            self._on_goal_received_record_on,
+            lambda: True,
+            lambda: None,
+            lambda: True,
+            lambda: "No feedback",
+            loop_frequency = 1.0
+        )
+
+        # Action server: stop recording.
+        self._record_off_as = GentlerActionServer(
+            self._node,
+            Z1Topics.GIMBAL_RECORD_OFF_ACTION,
+            self._on_goal_received_record_off,
             lambda: True,
             lambda: None,
             lambda: True,
@@ -187,7 +212,7 @@ class GimbalActionServer:
                 yaw = math.degrees(yaw)
                 
                 #Slow down the movements of the camera to make it work even with the delays in the detecion pipeline
-                pitch *= 0.4
+                pitch *= 0.6
                 yaw *= 0.4
 
                 new_pitch = self.gcu_feedback.relative_pitch - pitch
@@ -305,6 +330,46 @@ class GimbalActionServer:
         except ValueError as e:
             self.log("Invalid value in goal request")
             return False
+
+    def send_camera_command(self, cmd: str):
+        #Publish a camera command to read_and_publish.py.
+        #The command string should be one of:
+        #  'toggle_record' -- toggles recording on/off at the hardware level
+        #  'osd_on'        -- enables the OSD overlay
+        #  'osd_off'       -- disables the OSD overlay
+
+        msg = String()
+        msg.data = cmd
+        self._camera_cmd_publisher.publish(msg)
+        self.log(f"Published camera command: '{cmd}'")
+
+    def _on_goal_received_record_on(self, goal_request: dict) -> bool:
+
+        self.log("Received record ON goal")
+
+        if self.gcu_feedback.recording:
+            # Already recording -- nothing to do.
+            self.log("Already recording -- no command sent.")
+            return True
+
+        # Not yet recording -- send the toggle to start.
+        self.log("Not recording -- sending toggle_record to start.")
+        self.send_camera_command("toggle_record")
+        return True
+
+    def _on_goal_received_record_off(self, goal_request: dict) -> bool:
+
+        self.log("Received record OFF goal")
+
+        if not self.gcu_feedback.recording:
+            # Already stopped -- nothing to do.
+            self.log("Not recording -- no command sent.")
+            return True
+
+        # Currently recording -- send the toggle to stop.
+        self.log("Currently recording -- sending toggle_record to stop.")
+        self.send_camera_command("toggle_record")
+        return True
 
 
 def main():
